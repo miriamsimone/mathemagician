@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./outputs:/app/outputs
+    environment:
+      - ENVIRONMENT=local
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - GCS_BUCKET=${GCS_BUCKET:-mathemagician-outputs-dev}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  redis_data:
