@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mathemagician - Physics Visualization Player</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #1a1a1a; color: #fff; overflow: hidden; }
+    #container { display: flex; height: 100vh; }
+    #sidebar { width: 350px; background: #2a2a2a; padding: 20px; overflow-y: auto; border-right: 1px solid #444; }
+    #canvas-container { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; background: #000; }
+    h1 { font-size: 24px; margin-bottom: 20px; color: #4CAF50; }
+    .input-group { margin-bottom: 20px; }
+    label { display: block; margin-bottom: 8px; font-size: 14px; color: #aaa; }
+    input[type="text"], textarea { width: 100%; padding: 10px; background: #333; border: 1px solid #555; color: #fff; border-radius: 4px; font-size: 14px; }
+    textarea { resize: vertical; min-height: 80px; }
+    button { width: 100%; padding: 12px; margin-bottom: 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; transition: background 0.3s; }
+    button:hover { background: #45a049; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    button.secondary { background: #2196F3; }
+    button.secondary:hover { background: #0b7dda; }
+    #status { padding: 15px; background: #333; border-radius: 4px; margin-top: 20px; font-size: 13px; line-height: 1.6; color: #ccc; }
+    #status.error { background: #d32f2f; color: #fff; }
+    #status.success { background: #388e3c; color: #fff; }
+    .suggestions { margin-top: 10px; padding: 10px; background: #444; border-radius: 4px; font-size: 12px; }
+    .suggestions div { margin: 5px 0; cursor: pointer; color: #4CAF50; }
+    .suggestions div:hover { text-decoration: underline; }
+    canvas { display: block; border: 1px solid #444; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="sidebar">
+      <h1>🪐 Mathemagician</h1>
+      <div class="input-group">
+        <label for="prompt">Describe your visualization:</label>
+        <textarea id="prompt" placeholder="e.g., Show planetary formation from dust cloud with iron core, rocky mantle, and icy outer layer"></textarea>
+      </div>
+      <button id="generateBtn">Generate Animation</button>
+      <div class="input-group">
+        <label for="editPrompt">Edit current animation:</label>
+        <input type="text" id="editPrompt" placeholder="e.g., Make it faster, add more particles" disabled>
+      </div>
+      <button id="editBtn" class="secondary" disabled>Apply Edit</button>
+      <button id="recordBtn" disabled>Record Video</button>
+      <button id="downloadBtn" style="display: none;">Download Video</button>
+      <div id="status">Ready. Enter a prompt and click Generate.</div>
+    </div>
+    <div id="canvas-container">
+      <canvas id="renderCanvas"></canvas>
+    </div>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script type="module">
+    import RAPIER from './rapier.mjs';
+
+    RAPIER.init().then(() => {
+      console.log('✅ Rapier physics engine loaded');
+      window.RAPIER = RAPIER;
+      init();
+    }).catch(err => {
+      console.error('❌ Failed to load Rapier:', err);
+    });
+
+    let scene, camera, renderer;
+    let animationConfig = null;
+    let particles = [];
+    let physicsWorld = null;
+    let rigidBodies = [];
+    let isAnimating = false;
+    let startTime = null;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let animationFrameId = null;
+
+    async function init() {
+      const canvas = document.getElementById('renderCanvas');
+      canvas.width = 1920;
+      canvas.height = 1080;
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(45, canvas.width / canvas.height, 0.1, 1000);
+      camera.position.set(0, 0, 30);
+      camera.lookAt(0, 0, 0);
+      renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+      renderer.setSize(canvas.width, canvas.height);
+      renderer.setClearColor(0x000000, 0);
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+      scene.add(ambientLight);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      directionalLight.position.set(10, 10, 10);
+      scene.add(directionalLight);
+      console.log('✅ Three.js initialized');
+      document.getElementById('generateBtn').addEventListener('click', generateAnimation);
+      document.getElementById('editBtn').addEventListener('click', editAnimation);
+      document.getElementById('recordBtn').addEventListener('click', startRecording);
+      document.getElementById('downloadBtn').addEventListener('click', downloadVideo);
+    }
+
+    async function generateAnimation() {
+      const prompt = document.getElementById('prompt').value.trim();
+      if (!prompt) { setStatus('Please enter a prompt', 'error'); return; }
+      setStatus('Generating animation config with GPT...');
+      document.getElementById('generateBtn').disabled = true;
+      try {
+        const response = await fetch('http://localhost:3000/generate-animation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          if (data.suggestions) {
+            let errorHTML = data.message + '<div class="suggestions">Suggestions:';
+            data.suggestions.forEach(s => { errorHTML += '<div onclick="document.getElementById(\'prompt\').value=\'' + s.replace('Try: ', '') + '\'">' + s + '</div>'; });
+            errorHTML += '</div>';
+            setStatus(errorHTML, 'error');
+          } else { setStatus(data.error || 'Failed to generate animation', 'error'); }
+          return;
+        }
+        animationConfig = data.config;
+        console.log('Config received:', animationConfig);
+        setStatus('Config generated! Loading animation...', 'success');
+        await loadAnimation(animationConfig);
+        document.getElementById('editPrompt').disabled = false;
+        document.getElementById('editBtn').disabled = false;
+        document.getElementById('recordBtn').disabled = false;
+      } catch (error) {
+        console.error('Error:', error);
+        setStatus('Network error: ' + error.message, 'error');
+      } finally {
+        document.getElementById('generateBtn').disabled = false;
+      }
+    }
+
+    async function editAnimation() {
+      const editPrompt = document.getElementById('editPrompt').value.trim();
+      if (!editPrompt || !animationConfig) { setStatus('Enter an edit prompt first', 'error'); return; }
+      setStatus('Applying edit...');
+      document.getElementById('editBtn').disabled = true;
+      try {
+        const response = await fetch('http://localhost:3000/edit-animation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ currentConfig: animationConfig, editPrompt })
+        });
+        const data = await response.json();
+        if (!response.ok) { setStatus(data.error || 'Failed to apply edit', 'error'); return; }
+        animationConfig = data.config;
+        console.log('Config updated:', animationConfig);
+        setStatus('✏️ ' + data.changes, 'success');
+        await loadAnimation(animationConfig);
+        document.getElementById('editPrompt').value = '';
+      } catch (error) {
+        console.error('Error:', error);
+        setStatus('Network error: ' + error.message, 'error');
+      } finally {
+        document.getElementById('editBtn').disabled = false;
+      }
+    }
+
+    async function loadAnimation(config) {
+      if (animationFrameId) { cancelAnimationFrame(animationFrameId); }
+      isAnimating = false;
+      particles.forEach(p => scene.remove(p.mesh));
+      particles = [];
+      rigidBodies = [];
+      if (!window.RAPIER) { setStatus('Physics engine not loaded yet', 'error'); return; }
+      const gravity = { x: 0.0, y: 0.0, z: 0.0 };
+      physicsWorld = new window.RAPIER.World(gravity);
+      const canvas = document.getElementById('renderCanvas');
+      canvas.width = config.resolution[0];
+      canvas.height = config.resolution[1];
+      renderer.setSize(canvas.width, canvas.height);
+      if (config.background === 'transparent') {
+        renderer.setClearColor(0x000000, 0);
+      } else {
+        const color = new THREE.Color(config.background);
+        renderer.setClearColor(color, 1);
+      }
+      if (config.camera) {
+        if (config.camera.type === 'static') {
+          camera.position.set(...config.camera.position);
+          camera.lookAt(...config.camera.lookAt);
+        } else if (config.camera.type === 'orbit') {
+          camera.position.set(0, 0, config.camera.distance || 30);
+          camera.lookAt(0, 0, 0);
+        }
+      }
+      if (config.particleGroups) {
+        config.particleGroups.forEach(group => { createParticleGroup(group); });
+      } else if (config.particles) {
+        createSimpleParticles(config.particles);
+      } else if (config.objects) {
+        createScriptedObjects(config.objects);
+      }
+      setStatus('✅ Loaded ' + particles.length + ' particles. Animation ready!', 'success');
+      startTime = Date.now();
+      isAnimating = true;
+      animate(config);
+    }
+
+    function createParticleGroup(group) {
+      const dist = group.distribution;
+      for (let i = 0; i < group.count; i++) {
+        let pos;
+        if (dist.type === 'sphere') {
+          pos = randomSpherePoint(dist.radiusMin || 0, dist.radiusMax, dist.clustering || 0);
+        } else {
+          pos = { x: (Math.random() - 0.5) * 20, y: (Math.random() - 0.5) * 20, z: (Math.random() - 0.5) * 20 };
+        }
+        const geometry = new THREE.SphereGeometry(group.size, 8, 8);
+        const material = new THREE.MeshStandardMaterial({
+          color: group.color,
+          transparent: true,
+          opacity: group.opacity || 0.7,
+          roughness: 0.7,
+          metalness: group.element === 'iron' ? 0.8 : 0.3
+        });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.set(pos.x, pos.y, pos.z);
+        scene.add(mesh);
+        const rigidBodyDesc = window.RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z);
+        const rigidBody = physicsWorld.createRigidBody(rigidBodyDesc);
+        const colliderDesc = window.RAPIER.ColliderDesc.ball(group.size);
+        physicsWorld.createCollider(colliderDesc, rigidBody);
+        particles.push({ mesh, body: rigidBody, mass: group.mass || 1, element: group.element, baseOpacity: group.opacity || 0.7, baseColor: new THREE.Color(group.color) });
+        rigidBodies.push(rigidBody);
+      }
+    }
+
+    function createSimpleParticles(particleConfig) {
+      for (let i = 0; i < particleConfig.count; i++) {
+        const pos = randomSpherePoint(0, particleConfig.cloudRadius || 15, 0.5);
+        const geometry = new THREE.SphereGeometry(particleConfig.particleSize, 8, 8);
+        const material = new THREE.MeshStandardMaterial({ color: particleConfig.color, transparent: true, opacity: particleConfig.opacity || 0.7 });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.set(pos.x, pos.y, pos.z);
+        scene.add(mesh);
+        const rigidBodyDesc = window.RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z);
+        const rigidBody = physicsWorld.createRigidBody(rigidBodyDesc);
+        const colliderDesc = window.RAPIER.ColliderDesc.ball(particleConfig.particleSize);
+        physicsWorld.createCollider(colliderDesc, rigidBody);
+        particles.push({ mesh, body: rigidBody, mass: particleConfig.mass || 1, baseOpacity: particleConfig.opacity || 0.7 });
+        rigidBodies.push(rigidBody);
+      }
+    }
+
+    function createScriptedObjects(objects) {
+      objects.forEach(obj => {
+        let geometry;
+        if (obj.type === 'sphere') { geometry = new THREE.SphereGeometry(obj.radius, 32, 32); }
+        else if (obj.type === 'cube') { geometry = new THREE.BoxGeometry(obj.size, obj.size, obj.size); }
+        const material = new THREE.MeshStandardMaterial({ color: obj.color, transparent: true, opacity: obj.opacity || 1.0 });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.set(...obj.position);
+        scene.add(mesh);
+        particles.push({ mesh, body: null, animation: obj.animation });
+      });
+    }
+
+    function randomSpherePoint(minRadius, maxRadius, clustering) {
+      const theta = Math.random() * 2 * Math.PI;
+      const phi = Math.acos(2 * Math.random() - 1);
+      let r = minRadius + Math.random() * (maxRadius - minRadius);
+      if (clustering > 0) { r = r * (1 - clustering) + minRadius * clustering; }
+      return {
+        x: r * Math.sin(phi) * Math.cos(theta),
+        y: r * Math.sin(phi) * Math.sin(theta),
+        z: r * Math.cos(phi)
+      };
+    }
+
+    function animate(config) {
+      if (!isAnimating) return;
+      const elapsed = (Date.now() - startTime) / 1000;
+      const duration = config.duration || 10;
+      if (elapsed >= duration) {
+        setStatus('✅ Animation complete (' + duration + 's)', 'success');
+        isAnimating = false;
+        return;
+      }
+      const phaseParams = getCurrentPhase(config, elapsed);
+      if (physicsWorld && config.simulation) {
+        physicsWorld.step();
+        const centerAttraction = phaseParams.centerAttraction || config.simulation.centerAttraction || 0.1;
+        particles.forEach(particle => {
+          if (!particle.body) return;
+          const pos = particle.body.translation();
+          const distToCenter = Math.sqrt(pos.x ** 2 + pos.y ** 2 + pos.z ** 2);
+          if (distToCenter > 0.1) {
+            const forceMagnitude = centerAttraction * particle.mass;
+            const forceX = -(pos.x / distToCenter) * forceMagnitude;
+            const forceY = -(pos.y / distToCenter) * forceMagnitude;
+            const forceZ = -(pos.z / distToCenter) * forceMagnitude;
+            particle.body.addForce({ x: forceX, y: forceY, z: forceZ }, true);
+          }
+          const vel = particle.body.linvel();
+          const damping = config.simulation.damping || 0.98;
+          particle.body.setLinvel({ x: vel.x * damping, y: vel.y * damping, z: vel.z * damping }, true);
+          particle.mesh.position.set(pos.x, pos.y, pos.z);
+          if (phaseParams.particleOpacity !== undefined) { particle.mesh.material.opacity = phaseParams.particleOpacity; }
+          if (phaseParams.moltenCore && phaseParams.moltenCore.enabled) {
+            const moltenRadius = phaseParams.moltenCore.radius || 2;
+            if (distToCenter < moltenRadius) {
+              const glowIntensity = 1 - (distToCenter / moltenRadius);
+              const glowColor = new THREE.Color(phaseParams.moltenCore.glowColor || '#FF4500');
+              particle.mesh.material.emissive = glowColor;
+              particle.mesh.material.emissiveIntensity = glowIntensity * 0.5;
+            } else {
+              particle.mesh.material.emissive = new THREE.Color(0x000000);
+              particle.mesh.material.emissiveIntensity = 0;
+            }
+          }
+        });
+      }
+      particles.forEach(particle => {
+        if (particle.animation && !particle.body) {
+          const anim = particle.animation;
+          if (anim.type === 'rotation') {
+            particle.mesh.rotation.x += anim.speed * anim.axis[0];
+            particle.mesh.rotation.y += anim.speed * anim.axis[1];
+            particle.mesh.rotation.z += anim.speed * anim.axis[2];
+          }
+        }
+      });
+      if (config.camera && config.camera.type === 'orbit') {
+        const orbitSpeed = config.camera.speed || 0.1;
+        const distance = config.camera.distance || 30;
+        camera.position.x = distance * Math.cos(elapsed * orbitSpeed);
+        camera.position.z = distance * Math.sin(elapsed * orbitSpeed);
+        camera.lookAt(0, 0, 0);
+      }
+      renderer.render(scene, camera);
+      animationFrameId = requestAnimationFrame(() => animate(config));
+    }
+
+    function getCurrentPhase(config, elapsed) {
+      if (!config.phases || config.phases.length === 0) { return {}; }
+      for (let i = config.phases.length - 1; i >= 0; i--) {
+        if (elapsed >= config.phases[i].time) { return config.phases[i]; }
+      }
+      return config.phases[0];
+    }
+
+    function startRecording() {
+      if (!animationConfig) return;
+      setStatus('Recording video...');
+      document.getElementById('recordBtn').disabled = true;
+      const canvas = document.getElementById('renderCanvas');
+      const stream = canvas.captureStream(animationConfig.fps || 60);
+      recordedChunks = [];
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9', videoBitsPerSecond: 5000000 });
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) { recordedChunks.push(e.data); } };
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(recordedChunks, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+        document.getElementById('downloadBtn').style.display = 'block';
+        document.getElementById('downloadBtn').onclick = () => {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'mathemagician_' + Date.now() + '.webm';
+          a.click();
+        };
+        setStatus('✅ Video recorded! Click Download to save.', 'success');
+        document.getElementById('recordBtn').disabled = false;
+      };
+      mediaRecorder.start();
+      setTimeout(() => { if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); } }, (animationConfig.duration || 10) * 1000);
+      startTime = Date.now();
+      isAnimating = true;
+      animate(animationConfig);
+    }
+
+    function downloadVideo() {}
+
+    function setStatus(message, type = '') {
+      const statusEl = document.getElementById('status');
+      statusEl.innerHTML = message;
+      statusEl.className = type;
+    }
+  </script>
+</body>
+</html>
